@@ -1,4 +1,4 @@
-# MTU Tester
+# MTU Test & Optimize
 
 This repository contains a Bash script for testing and setting the optimal MTU (Maximum Transmission Unit) size for network interfaces. The script automates the process of finding the highest MTU value that can be used without packet loss.
 
