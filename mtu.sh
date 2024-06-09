@@ -1,5 +1,13 @@
 #!/bin/bash
 
+# Banner with your name
+echo "=========================================="
+echo "=                                         ="
+echo "=          Welcome to MTU Tester          ="
+echo "=             by  SobhanArab              ="
+echo "=             SobhanArab.com              ="
+echo "=========================================="
+
 # Function to find the active network interface
 find_interface() {
     local interface
