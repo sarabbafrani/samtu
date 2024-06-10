@@ -97,7 +97,7 @@ done
 sudo ip link set dev $interface mtu $current_mtu
 # Perform one final test with the determined optimal MTU
 if test_mtu $current_mtu; then
-    echo -e "\033[32mOptimal MTU set to $current_mtu on interface $interface ($percentage% packets received)\033[0m"
+    echo -e "\033[32mOptimal MTU set to $current_mtu on interface $interface \033[0m"
 else
     echo -e "\033[31mOptimal MTU set to $current_mtu on interface $interface (0% packets received)\033[0m"
 fi
