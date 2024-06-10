@@ -1,13 +1,15 @@
 #!/bin/bash
 
-# Banner with your name
+GREEN='\033[0;32m'
+
+NC='\033[0m'
+
 echo "=========================================="
 echo "=                                         ="
 echo "=          Welcome to MTU Tester          ="
 echo "=             by  SobhanArab              ="
-echo "=             SobhanArab.com              ="
+echo -e "=             ${GREEN}http://SobhanArab.com${NC}       ="
 echo "=========================================="
-
 # Function to find the active network interface
 find_interface() {
     local interface
