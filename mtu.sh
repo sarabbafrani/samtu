@@ -8,7 +8,7 @@ echo "=========================================="
 echo "=                                         ="
 echo "=          Welcome to MTU Tester          ="
 echo "=             by  SobhanArab              ="
-echo -e "=             ${GREEN}http://SobhanArab.com${NC}       ="
+echo -e "=         ${GREEN}http://SobhanArab.com${NC}       ="
 echo "=========================================="
 # Function to find the active network interface
 find_interface() {
