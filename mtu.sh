@@ -12,11 +12,9 @@ echo -e "=         ${GREEN}http://SobhanArab.com${NC}       ="
 echo "=========================================="
 
 
-# Function to find the default network interface
-find_interface() {
-    local interface
-    interface=$(ip route | grep default | awk '{print $5}')
-    echo $interface
+# Function to find all active network interfaces
+find_interfaces() {
+    ip -o link show up | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -v 'lo'
 }
 
 # Function to validate numeric input
@@ -32,39 +30,26 @@ validate_number() {
 
 # Function to test MTU with ping and display success percentage
 test_mtu() {
-    local mtu=$1
+    local interface=$1
+    local mtu=$2
     local payload=$((mtu - 28 - mux_value))  # Subtract 28 for IP header and MUX value
-    local result=$($ping_cmd -M do -s $payload -c $packets_to_send $destination_ip 2>&1)
-    local success=$(echo "$result" | grep 'received' | awk -F' ' '{ print $4 }')
-    local total=$packets_to_send
-    local percentage=$((success * 100 / total))
-
-    if [ $verbose -eq 1 ]; then
-        echo "$result"
-    fi
-
-    if [ "$percentage" -eq 100 ]; then
-        echo "MTU $mtu is OK ($percentage% packets received)"
-        return 0
-    else
-        echo "MTU $mtu is too high ($percentage% packets received)"
-        return 1
-    fi
+    $ping_cmd -I $interface -M do -s $payload -c $packets_to_send $destination_ip >/dev/null 2>&1
+    return $?
 }
 
-# Function to display a spinner while waiting for the MTU test
-spinner() {
-    local pid=$1
-    local delay=0.1
-    local spinstr='|/-\'
-    while ps -p $pid > /dev/null 2>&1; do
-        local temp=${spinstr#?}
-        printf " [%c]  " "$spinstr"
-        spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\b\b\b\b\b\b"
-    done
-    printf "    \b\b\b\b"
+# Function to update network configuration
+update_network_config() {
+    local interface=$1
+    local mtu=$2
+
+    if command -v netplan &>/dev/null; then
+        sudo sed -i "/\s*$interface:/,/^\s*[^[:space:]]/s/mtu:.*/mtu: $mtu/" /etc/netplan/01-netcfg.yaml
+    elif [ -f "/etc/network/interfaces" ]; then
+        sudo sed -i "/iface $interface/,/^$/s/mtu .*/mtu $mtu/" /etc/network/interfaces
+    elif [ -d "/etc/sysconfig/network-scripts" ]; then
+        sudo sed -i "s/^MTU=.*/MTU=$mtu/" "/etc/sysconfig/network-scripts/ifcfg-$interface"
+    fi
+    sudo ip link set dev "$interface" mtu "$mtu"
 }
 
 # Parse command line options
@@ -76,76 +61,68 @@ while getopts "v" opt; do
 done
 
 # Main script
-interface=$(find_interface)
+interfaces=$(find_interfaces)
 
-if [ -z "$interface" ]; then
-    echo "Could not determine the default network interface."
+if [ -z "$interfaces" ]; then
+    echo "No active network interfaces found."
     exit 1
 fi
 
-# Prompt the user for a destination IP or domain
 read -p "Enter destination IP or domain (press Enter for default 8.8.8.8): " destination_ip
+destination_ip=${destination_ip:-8.8.8.8}
 
-# If the user pressed Enter without typing anything, use the default
-if [ -z "$destination_ip" ]; then
-    destination_ip="8.8.8.8"
-fi
-
-# Check if IPv6
 if [[ $destination_ip =~ : ]]; then
-    echo "IPv6 address detected. Using ping6 instead of ping."
     ping_cmd="ping6"
 else
     ping_cmd="ping"
 fi
 
-# Ask the user for the number of packets to send for each MTU test
-read -p "Enter the number of packets to send for each MTU test (default is 4): " packets_to_send
-packets_to_send=$(validate_number "$packets_to_send" 4)
+read -p "Enter the number of packets to send for each MTU test (default is 2): " packets_to_send
+packets_to_send=$(validate_number "$packets_to_send" 2)
 
-# Ask the user for the MUX value
 read -p "Enter the MUX value (default is 0): " mux_value
 mux_value=$(validate_number "$mux_value" 0)
 
-# Set minimum and maximum MTU values
-min_mtu=576  # Minimum recommended MTU for IPv4
-max_mtu=1500  # Default Ethernet MTU
+min_mtu=576
+max_mtu=9000
 
-# Binary search for optimal MTU
-low_mtu=$min_mtu
-high_mtu=$max_mtu
+for interface in $interfaces; do
+    echo "Optimizing MTU for interface $interface"
+    low_mtu=$min_mtu
+    high_mtu=$max_mtu
+    
+    while [ $low_mtu -le $high_mtu ]; do
+        current_mtu=$(( (low_mtu + high_mtu) / 2 ))
+        if [ $verbose -eq 1 ]; then
+            echo "Testing MTU $current_mtu on $interface"
+        fi
+        
+        if test_mtu $interface $current_mtu; then
+            low_mtu=$((current_mtu + 1))
+        else
+            high_mtu=$((current_mtu - 1))
+        fi
+    done
 
-while [ $low_mtu -le $high_mtu ]; do
-    current_mtu=$(( (low_mtu + high_mtu) / 2 ))
-    echo "Testing MTU $current_mtu with $packets_to_send packets"
-    test_mtu $current_mtu &
-    spinner $!
-    wait $!
+    optimal_mtu=$high_mtu
+    
+    if [ $optimal_mtu -lt $min_mtu ]; then
+        echo -e "\033[33mWarning: MTU $optimal_mtu is below the recommended minimum of $min_mtu for $interface\033[0m"
+        optimal_mtu=$min_mtu
+    fi
 
-    if test_mtu $current_mtu; then
-        low_mtu=$((current_mtu + 1))
+    echo "Setting optimal MTU to $optimal_mtu on interface $interface"
+    update_network_config "$interface" "$optimal_mtu"
+
+    if test_mtu $interface $optimal_mtu; then
+        echo -e "\033[32mOptimal MTU set to $optimal_mtu on interface $interface\033[0m"
     else
-        high_mtu=$((current_mtu - 1))
+        echo -e "\033[31mFailed to set optimal MTU to $optimal_mtu on interface $interface\033[0m"
     fi
 done
 
-current_mtu=$high_mtu
-
-# Check if the optimal MTU is below the recommended minimum
-if [ $current_mtu -lt $min_mtu ]; then
-    echo -e "\033[33mWarning: MTU $current_mtu is below the recommended minimum of $min_mtu\033[0m"
-    current_mtu=$min_mtu
+if command -v netplan &>/dev/null; then
+    sudo netplan apply
 fi
 
-# Set the optimal MTU
-if ! sudo ip link set dev $interface mtu $current_mtu; then
-    echo -e "\033[31mFailed to set MTU. Make sure you have sudo privileges.\033[0m"
-    exit 1
-fi
-
-# Perform one final test with the determined optimal MTU
-if test_mtu $current_mtu; then
-    echo -e "\033[32mOptimal MTU set to $current_mtu on interface $interface\033[0m"
-else
-    echo -e "\033[31mOptimal MTU set to $current_mtu on interface $interface (0% packets received)\033[0m"
-fi
+echo "MTU optimization complete for all interfaces."
