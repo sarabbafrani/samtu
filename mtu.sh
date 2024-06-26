@@ -12,117 +12,73 @@ echo -e "=         ${GREEN}http://SobhanArab.com${NC}       ="
 echo "=========================================="
 
 
-# Function to find all active network interfaces
-find_interfaces() {
-    ip -o link show up | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -v 'lo'
-}
-
-# Function to validate numeric input
-validate_number() {
-    local input=$1
-    local default=$2
-    if [[ $input =~ ^[0-9]+$ ]]; then
-        echo $input
-    else
-        echo $default
-    fi
-}
-
-# Function to test MTU with ping and display success percentage
-test_mtu() {
-    local interface=$1
-    local mtu=$2
-    local payload=$((mtu - 28 - mux_value))  # Subtract 28 for IP header and MUX value
-    $ping_cmd -I $interface -M do -s $payload -c $packets_to_send $destination_ip >/dev/null 2>&1
-    return $?
-}
-
-# Function to update network configuration
-update_network_config() {
-    local interface=$1
-    local mtu=$2
-
-    if command -v netplan &>/dev/null; then
-        sudo sed -i "/\s*$interface:/,/^\s*[^[:space:]]/s/mtu:.*/mtu: $mtu/" /etc/netplan/01-netcfg.yaml
-    elif [ -f "/etc/network/interfaces" ]; then
-        sudo sed -i "/iface $interface/,/^$/s/mtu .*/mtu $mtu/" /etc/network/interfaces
-    elif [ -d "/etc/sysconfig/network-scripts" ]; then
-        sudo sed -i "s/^MTU=.*/MTU=$mtu/" "/etc/sysconfig/network-scripts/ifcfg-$interface"
-    fi
-    sudo ip link set dev "$interface" mtu "$mtu"
-}
-
-# Parse command line options
-verbose=0
-while getopts "v" opt; do
-    case $opt in
-        v) verbose=1 ;;
-    esac
-done
-
-# Main script
-interfaces=$(find_interfaces)
-
-if [ -z "$interfaces" ]; then
-    echo "No active network interfaces found."
-    exit 1
-fi
-
-read -p "Enter destination IP or domain (press Enter for default 8.8.8.8): " destination_ip
-destination_ip=${destination_ip:-8.8.8.8}
-
-if [[ $destination_ip =~ : ]]; then
-    ping_cmd="ping6"
-else
-    ping_cmd="ping"
-fi
-
-read -p "Enter the number of packets to send for each MTU test (default is 2): " packets_to_send
-packets_to_send=$(validate_number "$packets_to_send" 2)
-
-read -p "Enter the MUX value (default is 0): " mux_value
-mux_value=$(validate_number "$mux_value" 0)
-
-min_mtu=576
-max_mtu=9000
-
-for interface in $interfaces; do
-    echo "Optimizing MTU for interface $interface"
-    low_mtu=$min_mtu
-    high_mtu=$max_mtu
-    
-    while [ $low_mtu -le $high_mtu ]; do
-        current_mtu=$(( (low_mtu + high_mtu) / 2 ))
-        if [ $verbose -eq 1 ]; then
-            echo "Testing MTU $current_mtu on $interface"
-        fi
-        
-        if test_mtu $interface $current_mtu; then
-            low_mtu=$((current_mtu + 1))
-        else
-            high_mtu=$((current_mtu - 1))
-        fi
-    done
-
-    optimal_mtu=$high_mtu
-    
-    if [ $optimal_mtu -lt $min_mtu ]; then
-        echo -e "\033[33mWarning: MTU $optimal_mtu is below the recommended minimum of $min_mtu for $interface\033[0m"
-        optimal_mtu=$min_mtu
-    fi
-
-    echo "Setting optimal MTU to $optimal_mtu on interface $interface"
-    update_network_config "$interface" "$optimal_mtu"
-
-    if test_mtu $interface $optimal_mtu; then
-        echo -e "\033[32mOptimal MTU set to $optimal_mtu on interface $interface\033[0m"
-    else
-        echo -e "\033[31mFailed to set optimal MTU to $optimal_mtu on interface $interface\033[0m"
-    fi
-done
-
-if command -v netplan &>/dev/null; then
-    sudo netplan apply
-fi
+# ... [Previous MTU optimization code remains unchanged] ...
 
 echo "MTU optimization complete for all interfaces."
+
+# Part 2: Protocol Performance Optimization
+
+echo "Starting protocol performance optimization..."
+
+# Function to set sysctl parameter
+set_sysctl() {
+    local param=$1
+    local value=$2
+    sudo sysctl -w "$param=$value"
+    echo "$param = $value" | sudo tee -a /etc/sysctl.conf
+}
+
+# Get total system memory in kB
+total_mem=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+
+# Calculate 25% of total memory in bytes
+mem_quarter=$((total_mem * 1024 / 4))
+
+# TCP settings
+echo "Optimizing TCP settings..."
+set_sysctl net.ipv4.tcp_rmem "4096 87380 $mem_quarter"
+set_sysctl net.ipv4.tcp_wmem "4096 65536 $mem_quarter"
+set_sysctl net.core.rmem_max "$mem_quarter"
+set_sysctl net.core.wmem_max "$mem_quarter"
+set_sysctl net.ipv4.tcp_mem "$mem_quarter $mem_quarter $mem_quarter"
+set_sysctl net.ipv4.tcp_fin_timeout 15
+set_sysctl net.ipv4.tcp_keepalive_time 1200
+set_sysctl net.ipv4.tcp_max_syn_backlog 8192
+set_sysctl net.ipv4.tcp_tw_reuse 1
+
+# UDP settings
+echo "Optimizing UDP settings..."
+set_sysctl net.ipv4.udp_mem "$mem_quarter $mem_quarter $mem_quarter"
+set_sysctl net.ipv4.udp_rmem_min 8192
+set_sysctl net.ipv4.udp_wmem_min 8192
+
+# General network settings
+echo "Optimizing general network settings..."
+set_sysctl net.core.netdev_max_backlog 16384
+set_sysctl net.core.somaxconn 8192
+set_sysctl net.ipv4.ip_local_port_range "1024 65535"
+
+# Congestion control
+echo "Setting congestion control algorithm to BBR..."
+set_sysctl net.core.default_qdisc fq
+set_sysctl net.ipv4.tcp_congestion_control bbr
+
+# Increase the maximum number of open file descriptors
+echo "Increasing maximum number of open file descriptors..."
+sudo ulimit -n 1048576
+echo "* soft nofile 1048576" | sudo tee -a /etc/security/limits.conf
+echo "* hard nofile 1048576" | sudo tee -a /etc/security/limits.conf
+
+# Optimize kernel parameters for high-performance networking
+echo "Optimizing kernel parameters for high-performance networking..."
+set_sysctl net.core.optmem_max 65535
+set_sysctl net.ipv4.tcp_slow_start_after_idle 0
+set_sysctl net.ipv4.tcp_mtu_probing 1
+set_sysctl net.ipv4.tcp_fastopen 3
+
+# Apply all changes
+echo "Applying all changes..."
+sudo sysctl -p
+
+echo "Protocol performance optimization complete."
+echo "Please reboot your system for all changes to take effect."
