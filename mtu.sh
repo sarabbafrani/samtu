@@ -12,73 +12,140 @@ echo -e "=         ${GREEN}http://SobhanArab.com${NC}       ="
 echo "=========================================="
 
 
-# ... [Previous MTU optimization code remains unchanged] ...
-
-echo "MTU optimization complete for all interfaces."
-
-# Part 2: Protocol Performance Optimization
-
-echo "Starting protocol performance optimization..."
-
-# Function to set sysctl parameter
-set_sysctl() {
-    local param=$1
-    local value=$2
-    sudo sysctl -w "$param=$value"
-    echo "$param = $value" | sudo tee -a /etc/sysctl.conf
+# Function to find the default network interface
+find_interface() {
+    local interface
+    interface=$(ip route | grep default | awk '{print $5}')
+    echo $interface
 }
 
-# Get total system memory in kB
-total_mem=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+# Function to validate numeric input
+validate_number() {
+    local input=$1
+    local default=$2
+    if [[ $input =~ ^[0-9]+$ ]]; then
+        echo $input
+    else
+        echo $default
+    fi
+}
 
-# Calculate 25% of total memory in bytes
-mem_quarter=$((total_mem * 1024 / 4))
+# Function to test MTU with ping and display success percentage
+test_mtu() {
+    local mtu=$1
+    local payload=$((mtu - 28 - mux_value))  # Subtract 28 for IP header and MUX value
+    local result=$($ping_cmd -M do -s $payload -c $packets_to_send $destination_ip 2>&1)
+    local success=$(echo "$result" | grep 'received' | awk -F' ' '{ print $4 }')
+    local total=$packets_to_send
+    local percentage=$((success * 100 / total))
 
-# TCP settings
-echo "Optimizing TCP settings..."
-set_sysctl net.ipv4.tcp_rmem "4096 87380 $mem_quarter"
-set_sysctl net.ipv4.tcp_wmem "4096 65536 $mem_quarter"
-set_sysctl net.core.rmem_max "$mem_quarter"
-set_sysctl net.core.wmem_max "$mem_quarter"
-set_sysctl net.ipv4.tcp_mem "$mem_quarter $mem_quarter $mem_quarter"
-set_sysctl net.ipv4.tcp_fin_timeout 15
-set_sysctl net.ipv4.tcp_keepalive_time 1200
-set_sysctl net.ipv4.tcp_max_syn_backlog 8192
-set_sysctl net.ipv4.tcp_tw_reuse 1
+    if [ $verbose -eq 1 ]; then
+        echo "$result"
+    fi
 
-# UDP settings
-echo "Optimizing UDP settings..."
-set_sysctl net.ipv4.udp_mem "$mem_quarter $mem_quarter $mem_quarter"
-set_sysctl net.ipv4.udp_rmem_min 8192
-set_sysctl net.ipv4.udp_wmem_min 8192
+    if [ "$percentage" -eq 100 ]; then
+        echo "MTU $mtu is OK ($percentage% packets received)"
+        return 0
+    else
+        echo "MTU $mtu is too high ($percentage% packets received)"
+        return 1
+    fi
+}
 
-# General network settings
-echo "Optimizing general network settings..."
-set_sysctl net.core.netdev_max_backlog 16384
-set_sysctl net.core.somaxconn 8192
-set_sysctl net.ipv4.ip_local_port_range "1024 65535"
+# Function to display a spinner while waiting for the MTU test
+spinner() {
+    local pid=$1
+    local delay=0.1
+    local spinstr='|/-\'
+    while ps -p $pid > /dev/null 2>&1; do
+        local temp=${spinstr#?}
+        printf " [%c]  " "$spinstr"
+        spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+        printf "\b\b\b\b\b\b"
+    done
+    printf "    \b\b\b\b"
+}
 
-# Congestion control
-echo "Setting congestion control algorithm to BBR..."
-set_sysctl net.core.default_qdisc fq
-set_sysctl net.ipv4.tcp_congestion_control bbr
+# Parse command line options
+verbose=0
+while getopts "v" opt; do
+    case $opt in
+        v) verbose=1 ;;
+    esac
+done
 
-# Increase the maximum number of open file descriptors
-echo "Increasing maximum number of open file descriptors..."
-sudo ulimit -n 1048576
-echo "* soft nofile 1048576" | sudo tee -a /etc/security/limits.conf
-echo "* hard nofile 1048576" | sudo tee -a /etc/security/limits.conf
+# Main script
+interface=$(find_interface)
 
-# Optimize kernel parameters for high-performance networking
-echo "Optimizing kernel parameters for high-performance networking..."
-set_sysctl net.core.optmem_max 65535
-set_sysctl net.ipv4.tcp_slow_start_after_idle 0
-set_sysctl net.ipv4.tcp_mtu_probing 1
-set_sysctl net.ipv4.tcp_fastopen 3
+if [ -z "$interface" ]; then
+    echo "Could not determine the default network interface."
+    exit 1
+fi
 
-# Apply all changes
-echo "Applying all changes..."
-sudo sysctl -p
+# Prompt the user for a destination IP or domain
+read -p "Enter destination IP or domain (press Enter for default 8.8.8.8): " destination_ip
 
-echo "Protocol performance optimization complete."
-echo "Please reboot your system for all changes to take effect."
+# If the user pressed Enter without typing anything, use the default
+if [ -z "$destination_ip" ]; then
+    destination_ip="8.8.8.8"
+fi
+
+# Check if IPv6
+if [[ $destination_ip =~ : ]]; then
+    echo "IPv6 address detected. Using ping6 instead of ping."
+    ping_cmd="ping6"
+else
+    ping_cmd="ping"
+fi
+
+# Ask the user for the number of packets to send for each MTU test
+read -p "Enter the number of packets to send for each MTU test (default is 4): " packets_to_send
+packets_to_send=$(validate_number "$packets_to_send" 4)
+
+# Ask the user for the MUX value
+read -p "Enter the MUX value (default is 0): " mux_value
+mux_value=$(validate_number "$mux_value" 0)
+
+# Set minimum and maximum MTU values
+min_mtu=576  # Minimum recommended MTU for IPv4
+max_mtu=1500  # Default Ethernet MTU
+
+# Binary search for optimal MTU
+low_mtu=$min_mtu
+high_mtu=$max_mtu
+
+while [ $low_mtu -le $high_mtu ]; do
+    current_mtu=$(( (low_mtu + high_mtu) / 2 ))
+    echo "Testing MTU $current_mtu with $packets_to_send packets"
+    test_mtu $current_mtu &
+    spinner $!
+    wait $!
+
+    if test_mtu $current_mtu; then
+        low_mtu=$((current_mtu + 1))
+    else
+        high_mtu=$((current_mtu - 1))
+    fi
+done
+
+current_mtu=$high_mtu
+
+# Check if the optimal MTU is below the recommended minimum
+if [ $current_mtu -lt $min_mtu ]; then
+    echo -e "\033[33mWarning: MTU $current_mtu is below the recommended minimum of $min_mtu\033[0m"
+    current_mtu=$min_mtu
+fi
+
+# Set the optimal MTU
+if ! sudo ip link set dev $interface mtu $current_mtu; then
+    echo -e "\033[31mFailed to set MTU. Make sure you have sudo privileges.\033[0m"
+    exit 1
+fi
+
+# Perform one final test with the determined optimal MTU
+if test_mtu $current_mtu; then
+    echo -e "\033[32mOptimal MTU set to $current_mtu on interface $interface\033[0m"
+else
+    echo -e "\033[31mOptimal MTU set to $current_mtu on interface $interface (0% packets received)\033[0m"
+fi
