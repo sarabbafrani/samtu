@@ -22,3 +22,4 @@ curl -sSL https://raw.githubusercontent.com/sarabbafrani/samtu/main/mtu.sh > mtu
 ```bash
 wget -qO- https://raw.githubusercontent.com/sarabbafrani/samtu/main/mtu.sh > mtu.sh && chmod +x mtu.sh && sudo ./mtu.sh
 ```
+![saMTU](https://github.com/user-attachments/assets/9adab340-b65a-493d-b732-266eda2c9767)
