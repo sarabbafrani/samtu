@@ -1,151 +1,181 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-GREEN='\033[0;32m'
+VERSION=2.0.0
 
-NC='\033[0m'
+DEST=8.8.8.8
+COUNT=4
+OVERHEAD=0
+TIMEOUT=2
+IFACE=""
+APPLY=0
+QUIET=0
+LOWER=576
 
-echo "=========================================="
-echo "=                                         ="
-echo "=          Welcome to MTU Tester          ="
-echo "=             by  SobhanArab              ="
-echo -e "=         ${GREEN}http://SobhanArab.com${NC}       ="
-echo "=========================================="
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    RED=$'\033[0;31m'
+    GREEN=$'\033[0;32m'
+    YELLOW=$'\033[1;33m'
+    NC=$'\033[0m'
+else
+    RED='' GREEN='' YELLOW='' NC=''
+fi
 
+say() { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
+progress() { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*" >&2; }
+warn() { printf '%s%s%s\n' "$YELLOW" "$*" "$NC" >&2; }
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-# Function to find the default network interface
-find_interface() {
-    local interface
-    interface=$(ip route | grep default | awk '{print $5}')
-    echo $interface
+usage() {
+    cat <<EOF
+samtu $VERSION - find the largest packet size that survives the path
+
+Usage: ${0##*/} [options]
+
+Options:
+  -d HOST     destination, address or name (default: $DEST)
+  -i IFACE    interface to read the ceiling from and to change (default: the
+              interface holding the default route)
+  -c N        packets per probe (default: $COUNT)
+  -o N        tunnel overhead to subtract, in bytes (default: $OVERHEAD)
+  -w N        timeout per probe in seconds (default: $TIMEOUT)
+  -l N        lowest size to consider (default: $LOWER)
+  -a          set the discovered MTU on the interface
+  -q          print only the result
+  -h          this message
+
+Without -a nothing on the system is changed.
+
+by Sobhan Arab, https://sobhanarab.com
+EOF
 }
 
-# Function to validate numeric input
-validate_number() {
-    local input=$1
-    local default=$2
-    if [[ $input =~ ^[0-9]+$ ]]; then
-        echo $input
-    else
-        echo $default
-    fi
+default_interface() {
+    ip route show default 2>/dev/null | awk '/default/ { for (i = 1; i < NF; i++) if ($i == "dev") print $(i+1); exit }'
 }
 
-# Function to test MTU with ping and display success percentage
-test_mtu() {
-    local mtu=$1
-    local payload=$((mtu - 28 - mux_value))  # Subtract 28 for IP header and MUX value
-    local result=$($ping_cmd -M do -s $payload -c $packets_to_send $destination_ip 2>&1)
-    local success=$(echo "$result" | grep 'received' | awk -F' ' '{ print $4 }')
-    local total=$packets_to_send
-    local percentage=$((success * 100 / total))
-
-    if [ $verbose -eq 1 ]; then
-        echo "$result"
-    fi
-
-    if [ "$percentage" -eq 100 ]; then
-        echo "MTU $mtu is OK ($percentage% packets received)"
-        return 0
-    else
-        echo "MTU $mtu is too high ($percentage% packets received)"
-        return 1
-    fi
+interface_mtu() {
+    local iface=$1
+    ip link show dev "$iface" 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "mtu") { print $(i+1); exit } }'
 }
 
-# Function to display a spinner while waiting for the MTU test
-spinner() {
-    local pid=$1
-    local delay=0.1
-    local spinstr='|/-\'
-    while ps -p $pid > /dev/null 2>&1; do
-        local temp=${spinstr#?}
-        printf " [%c]  " "$spinstr"
-        spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\b\b\b\b\b\b"
-    done
-    printf "    \b\b\b\b"
-}
-
-# Parse command line options
-verbose=0
-while getopts "v" opt; do
-    case $opt in
-        v) verbose=1 ;;
+is_ipv6() {
+    case $1 in
+        *:*) return 0 ;;
+        *) return 1 ;;
     esac
-done
+}
 
-# Main script
-interface=$(find_interface)
+probe() {
+    local size=$1 payload output received
+    payload=$((size - HEADER - OVERHEAD))
+    [ "$payload" -ge 0 ] || return 1
+    output=$(ping "$FAMILY" -M "do" -s "$payload" -c "$COUNT" -W "$TIMEOUT" -n -q "$DEST" 2>&1 || true)
+    received=$(printf '%s' "$output" | grep -oE '[0-9]+ received' | grep -oE '^[0-9]+' || printf '0')
+    [ "${received:-0}" -eq "$COUNT" ]
+}
 
-if [ -z "$interface" ]; then
-    echo "Could not determine the default network interface."
-    exit 1
-fi
+search() {
+    local low=$1 high=$2 best=0 mid
+    while [ "$low" -le "$high" ]; do
+        mid=$(( (low + high) / 2 ))
+        if probe "$mid"; then
+            progress "  ${GREEN}ok${NC}      $mid"
+            best=$mid
+            low=$((mid + 1))
+        else
+            progress "  ${RED}dropped${NC} $mid"
+            high=$((mid - 1))
+        fi
+    done
+    printf '%s' "$best"
+}
 
-# Prompt the user for a destination IP or domain
-read -p "Enter destination IP or domain (press Enter for default 8.8.8.8): " destination_ip
-
-# If the user pressed Enter without typing anything, use the default
-if [ -z "$destination_ip" ]; then
-    destination_ip="8.8.8.8"
-fi
-
-# Check if IPv6
-if [[ $destination_ip =~ : ]]; then
-    echo "IPv6 address detected. Using ping6 instead of ping."
-    ping_cmd="ping6"
-else
-    ping_cmd="ping"
-fi
-
-# Ask the user for the number of packets to send for each MTU test
-read -p "Enter the number of packets to send for each MTU test (default is 4): " packets_to_send
-packets_to_send=$(validate_number "$packets_to_send" 4)
-
-# Ask the user for the MUX value
-read -p "Enter the MUX value (default is 0): " mux_value
-mux_value=$(validate_number "$mux_value" 0)
-
-# Set minimum and maximum MTU values
-min_mtu=576  # Minimum recommended MTU for IPv4
-max_mtu=1500  # Default Ethernet MTU
-
-# Binary search for optimal MTU
-low_mtu=$min_mtu
-high_mtu=$max_mtu
-
-while [ $low_mtu -le $high_mtu ]; do
-    current_mtu=$(( (low_mtu + high_mtu) / 2 ))
-    echo "Testing MTU $current_mtu with $packets_to_send packets"
-    test_mtu $current_mtu &
-    spinner $!
-    wait $!
-
-    if test_mtu $current_mtu; then
-        low_mtu=$((current_mtu + 1))
-    else
-        high_mtu=$((current_mtu - 1))
+apply_mtu() {
+    local iface=$1 mtu=$2
+    local runner=""
+    if [ "$(id -u)" -ne 0 ]; then
+        command -v sudo >/dev/null 2>&1 || die "changing the MTU needs root"
+        runner=sudo
     fi
-done
+    $runner ip link set dev "$iface" mtu "$mtu" || die "could not set the MTU on $iface"
+    local now
+    now=$(interface_mtu "$iface")
+    [ "$now" = "$mtu" ] || die "the interface reports $now after the change"
+    say "${GREEN}$iface is now at $mtu${NC}"
+}
 
-current_mtu=$high_mtu
+main() {
+    local opt
+    while getopts "d:i:c:o:w:l:aqh" opt; do
+        case $opt in
+            d) DEST=$OPTARG ;;
+            i) IFACE=$OPTARG ;;
+            c) COUNT=$OPTARG ;;
+            o) OVERHEAD=$OPTARG ;;
+            w) TIMEOUT=$OPTARG ;;
+            l) LOWER=$OPTARG ;;
+            a) APPLY=1 ;;
+            q) QUIET=1 ;;
+            h) usage; return 0 ;;
+            *) usage >&2; return 2 ;;
+        esac
+    done
 
-# Check if the optimal MTU is below the recommended minimum
-if [ $current_mtu -lt $min_mtu ]; then
-    echo -e "\033[33mWarning: MTU $current_mtu is below the recommended minimum of $min_mtu\033[0m"
-    current_mtu=$min_mtu
-fi
+    case $COUNT$OVERHEAD$TIMEOUT$LOWER in
+        *[!0-9]*) die "-c, -o, -w and -l take whole numbers" ;;
+    esac
+    command -v ping >/dev/null 2>&1 || die "ping is missing"
+    command -v ip >/dev/null 2>&1 || die "iproute2 is missing"
 
-# Set the optimal MTU
-if ! sudo ip link set dev $interface mtu $current_mtu; then
-    echo -e "\033[31mFailed to set MTU. Make sure you have sudo privileges.\033[0m"
-    exit 1
-fi
+    if is_ipv6 "$DEST"; then
+        FAMILY=-6
+        HEADER=48
+        [ "$LOWER" -ge 1280 ] || LOWER=1280
+    else
+        FAMILY=-4
+        HEADER=28
+    fi
 
-# Perform one final test with the determined optimal MTU
-if test_mtu $current_mtu; then
-    echo -e "\033[32mOptimal MTU set to $current_mtu on interface $interface\033[0m"
-else
-    echo -e "\033[31mOptimal MTU set to $current_mtu on interface $interface (0% packets received)\033[0m"
+    [ -n "$IFACE" ] || IFACE=$(default_interface)
+    [ -n "$IFACE" ] || die "no default route, name an interface with -i"
+
+    local ceiling
+    ceiling=$(interface_mtu "$IFACE")
+    [ -n "$ceiling" ] || die "$IFACE does not exist"
+
+    say "destination $DEST over $IFACE, current MTU $ceiling, $COUNT packets per probe"
+    [ "$OVERHEAD" -eq 0 ] || say "subtracting $OVERHEAD bytes of tunnel overhead"
+    say
+
+    if ! probe "$LOWER"; then
+        die "even $LOWER bytes does not get through, check the path to $DEST first"
+    fi
+
+    local found
+    found=$(search "$LOWER" "$ceiling")
+    say
+
+    if [ "$found" -eq 0 ]; then
+        die "nothing between $LOWER and $ceiling made it through"
+    fi
+
+    if [ "$QUIET" -eq 1 ]; then
+        printf '%s\n' "$found"
+    else
+        printf '%slargest working MTU: %s%s\n' "$GREEN" "$found" "$NC"
+        if [ "$found" -eq "$ceiling" ]; then
+            say "the interface is already there, nothing to change"
+        fi
+    fi
+
+    if [ "$APPLY" -eq 1 ] && [ "$found" -ne "$ceiling" ]; then
+        apply_mtu "$IFACE" "$found"
+    elif [ "$APPLY" -eq 0 ] && [ "$found" -ne "$ceiling" ]; then
+        say "run again with -a to set it, or: sudo ip link set dev $IFACE mtu $found"
+    fi
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
 fi
